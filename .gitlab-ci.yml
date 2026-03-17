@@ -106,6 +106,8 @@ workflow:
     GIT_STRATEGY: clone
     GIT_DEPTH: 0
     GIT_SUBMODULE_STRATEGY: recursive
+  before_script:
+    - mkdir -p test/artifacts/
   artifacts:
     when: always
     paths:
@@ -156,14 +158,15 @@ test-ubuntu-asan:
   when: manual
 
 test-mac-m1:
-    extends: .test
-    tags: [mac-dev-m1]
-    script:
-      - ulimit -n 10240
-      - sudo mkdir -p /private/tmp/t
-      - sudo chown -R $(id -u) /private/tmp/t
-      - export PATH="$PATH:$PWD" # for GLAuth (CMake will download it)
-      - make -f .test.mk build
+  extends: .test
+  tags: [mac-dev-m1]
+  script:
+    - ulimit -n 10240
+    - sudo mkdir -p /private/tmp/t
+    - sudo chown -R $(id -u) /private/tmp/t
+    - export PATH="$PATH:$PWD" # for GLAuth (CMake will download it)
+    - make -f .test.mk build
+  when: manual
 
 checkpatch:
     extends: .test
