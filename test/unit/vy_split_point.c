@@ -1132,10 +1132,146 @@ test_bloat_guard_with_split(void)
 	footer();
 }
 
+/** Three overlapping slices; spec order: [0]=oldest, [2]=newest (list head). */
+static const struct vy_slice_i64 tombstone_overlap_specs[] = {
+	{ .begin = 1, .end = 50, .end_type = END_IN, .bytes = 8192 },
+	{ .begin = 20, .end = 70, .end_type = END_IN, .bytes = 8192 },
+	{ .begin = 40, .end = 90, .end_type = END_IN, .bytes = 8192 },
+	VY_SLICE_LAST,
+};
+
+static void
+test_tombstone_plan_threshold_disabled(void)
+{
+	header();
+	plan(2);
+	int n;
+	struct vy_slice **slices;
+	struct vy_range *range =
+		vy_test_range_new(tombstone_overlap_specs, &slices, &n);
+	slices[0]->count.rows = 100;
+	slices[0]->stmt_stat.deletes = 90;
+	slices[1]->count.rows = 100;
+	slices[1]->stmt_stat.deletes = 10;
+	slices[2]->count.rows = 100;
+	slices[2]->stmt_stat.deletes = 10;
+
+	struct index_opts opts;
+	index_opts_create(&opts);
+	opts.run_count_per_level = 100;
+	opts.run_size_ratio = 2;
+	/* Large enough to avoid split; avoid INT64_MAX/2 (overflow in * 3/2). */
+	opts.range_size = 1024LL * 1024 * 1024;
+	opts.tombstone_threshold = 1.;
+
+	vy_range_update_compaction_priority(range, &opts, opts.range_size);
+	is(range->compaction_plan.count, 0, "tombstone threshold 1.0 disables");
+	ok(!range->compaction_plan.is_tombstone, "tombstone flag off");
+
+	vy_test_range_delete(range, slices, n);
+	check_plan();
+	footer();
+}
+
+static void
+test_tombstone_plan_oldest_trigger(void)
+{
+	header();
+	plan(3);
+	int n;
+	struct vy_slice **slices;
+	struct vy_range *range =
+		vy_test_range_new(tombstone_overlap_specs, &slices, &n);
+	slices[0]->count.rows = 100;
+	slices[0]->stmt_stat.deletes = 60;
+	slices[1]->count.rows = 100;
+	slices[1]->stmt_stat.deletes = 10;
+	slices[2]->count.rows = 100;
+	slices[2]->stmt_stat.deletes = 10;
+
+	struct index_opts opts;
+	index_opts_create(&opts);
+	opts.run_count_per_level = 100;
+	opts.run_size_ratio = 2;
+	opts.range_size = 1024LL * 1024 * 1024;
+	opts.tombstone_threshold = 0.5;
+
+	vy_range_update_compaction_priority(range, &opts, opts.range_size);
+	is(range->compaction_plan.count, 3, "tombstone plan all slices");
+	ok(range->compaction_plan.is_tombstone, "tombstone flag set");
+	ok(range->compaction_plan.is_last_level, "last level (oldest in plan)");
+
+	vy_test_range_delete(range, slices, n);
+	check_plan();
+	footer();
+}
+
+static void
+test_tombstone_plan_no_trigger_low_ratio(void)
+{
+	header();
+	plan(2);
+	int n;
+	struct vy_slice **slices;
+	struct vy_range *range =
+		vy_test_range_new(tombstone_overlap_specs, &slices, &n);
+	for (int i = 0; i < n; i++) {
+		slices[i]->count.rows = 100;
+		slices[i]->stmt_stat.deletes = 10;
+	}
+
+	struct index_opts opts;
+	index_opts_create(&opts);
+	opts.run_count_per_level = 100;
+	opts.run_size_ratio = 2;
+	opts.range_size = 1024LL * 1024 * 1024;
+	opts.tombstone_threshold = 0.5;
+
+	vy_range_update_compaction_priority(range, &opts, opts.range_size);
+	is(range->compaction_plan.count, 0, "no slice exceeds ratio");
+	ok(!range->compaction_plan.is_tombstone, "tombstone flag off");
+
+	vy_test_range_delete(range, slices, n);
+	check_plan();
+	footer();
+}
+
+static void
+test_tombstone_plan_middle_trigger_plus_older(void)
+{
+	header();
+	plan(2);
+	int n;
+	struct vy_slice **slices;
+	struct vy_range *range =
+		vy_test_range_new(tombstone_overlap_specs, &slices, &n);
+	slices[0]->count.rows = 100;
+	slices[0]->stmt_stat.deletes = 10;
+	slices[1]->count.rows = 100;
+	slices[1]->stmt_stat.deletes = 80;
+	slices[2]->count.rows = 100;
+	slices[2]->stmt_stat.deletes = 10;
+
+	struct index_opts opts;
+	index_opts_create(&opts);
+	opts.run_count_per_level = 100;
+	opts.run_size_ratio = 2;
+	opts.range_size = 1024LL * 1024 * 1024;
+	opts.tombstone_threshold = 0.5;
+
+	vy_range_update_compaction_priority(range, &opts, opts.range_size);
+	is(range->compaction_plan.count, 3, "middle trigger + older slice");
+	ok(range->compaction_plan.is_tombstone, "tombstone flag set");
+
+	vy_test_range_delete(range, slices, n);
+	check_plan();
+	footer();
+}
+
 int
 main(void)
 {
-	plan(6);
+	plan(10);
 	header();
 
 	vy_iterator_C_test_init(128 * 1024);
@@ -1151,6 +1287,10 @@ main(void)
 	test_vy_slice_cut_boundaries();
 	test_vy_compaction_plan_trim();
 	test_bloat_guard_with_split();
+	test_tombstone_plan_threshold_disabled();
+	test_tombstone_plan_oldest_trigger();
+	test_tombstone_plan_no_trigger_low_ratio();
+	test_tombstone_plan_middle_trigger_plus_older();
 
 	key_def_delete(cmp_def);
 	vy_run_env_destroy(&run_env);
