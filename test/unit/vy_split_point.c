@@ -1260,8 +1260,115 @@ test_tombstone_plan_middle_trigger_plus_older(void)
 	opts.tombstone_threshold = 0.5;
 
 	vy_range_update_compaction_priority(range, &opts, opts.range_size);
-	is(range->compaction_plan.count, 3, "middle trigger + older slice");
+	is(range->compaction_plan.count, 2,
+	   "middle trigger: same LSM level for all slices, prefix only");
 	ok(range->compaction_plan.is_tombstone, "tombstone flag set");
+
+	vy_test_range_delete(range, slices, n);
+	check_plan();
+	footer();
+}
+
+/**
+ * Oldest run is larger so shape assigns it a deeper level than the two
+ * newer runs; tombstone plan adds that deeper slice (not merely rlist_next).
+ */
+static const struct vy_slice_i64 tombstone_next_level_specs[] = {
+	{ .begin = 1, .end = 50, .end_type = END_IN, .bytes = 32768 },
+	{ .begin = 20, .end = 70, .end_type = END_IN, .bytes = 8192 },
+	{ .begin = 40, .end = 90, .end_type = END_IN, .bytes = 8192 },
+	VY_SLICE_LAST,
+};
+
+static void
+test_tombstone_plan_next_level_one_deeper(void)
+{
+	header();
+	plan(3);
+	int n;
+	struct vy_slice **slices;
+	struct vy_range *range =
+		vy_test_range_new(tombstone_next_level_specs, &slices, &n);
+	slices[0]->count.rows = 100;
+	slices[0]->stmt_stat.deletes = 10;
+	slices[1]->count.rows = 100;
+	slices[1]->stmt_stat.deletes = 80;
+	slices[2]->count.rows = 100;
+	slices[2]->stmt_stat.deletes = 10;
+
+	struct index_opts opts;
+	index_opts_create(&opts);
+	opts.run_count_per_level = 100;
+	opts.run_size_ratio = 2;
+	opts.range_size = 1024LL * 1024 * 1024;
+	opts.tombstone_threshold = 0.5;
+
+	vy_range_update_compaction_priority(range, &opts, opts.range_size);
+	is(range->compaction_plan.count, 3,
+	   "middle trigger + one slice from trigger_level+1");
+	ok(range->compaction_plan.is_tombstone, "tombstone flag set");
+	ok(range->compaction_plan.slices[2] == slices[0],
+	   "deepest slice is oldest (large run), not rlist neighbor only");
+
+	vy_test_range_delete(range, slices, n);
+	check_plan();
+	footer();
+}
+
+/**
+ * Two runs share the level below the trigger; pick the one with max
+ * tombstone ratio (not the immediate rlist_next older slice).
+ *
+ * A fifth, larger oldest slice is required so shape compaction does not
+ * select the whole range (vy_range_shape_level_pass ends with a single
+ * run on the deepest level when the last slice is much larger than the
+ * pair on the level above).
+ */
+static const struct vy_slice_i64 tombstone_next_level_max_ratio_specs[] = {
+	{ .begin = 1, .end = 50, .end_type = END_IN, .bytes = 131072 },
+	{ .begin = 20, .end = 70, .end_type = END_IN, .bytes = 32768 },
+	{ .begin = 40, .end = 90, .end_type = END_IN, .bytes = 32768 },
+	{ .begin = 60, .end = 120, .end_type = END_IN, .bytes = 8192 },
+	{ .begin = 80, .end = 140, .end_type = END_IN, .bytes = 8192 },
+	VY_SLICE_LAST,
+};
+
+static void
+test_tombstone_plan_next_level_max_ratio(void)
+{
+	header();
+	plan(4);
+	int n;
+	struct vy_slice **slices;
+	struct vy_range *range = vy_test_range_new(
+		tombstone_next_level_max_ratio_specs, &slices, &n);
+	/* Spec order oldest..newest: E,A,B,C,D. rlist head..tail: D,C,B,A,E */
+	slices[0]->count.rows = 100;
+	slices[0]->stmt_stat.deletes = 10;
+	slices[1]->count.rows = 100;
+	slices[1]->stmt_stat.deletes = 40; /* max ratio on L+1 vs A, < threshold */
+	slices[2]->count.rows = 100;
+	slices[2]->stmt_stat.deletes = 10; /* rlist_next(C) — lower ratio */
+	slices[3]->count.rows = 100;
+	slices[3]->stmt_stat.deletes = 80; /* trigger */
+	slices[4]->count.rows = 100;
+	slices[4]->stmt_stat.deletes = 10;
+
+	struct index_opts opts;
+	index_opts_create(&opts);
+	opts.run_count_per_level = 100;
+	opts.run_size_ratio = 2;
+	opts.range_size = 1024LL * 1024 * 1024;
+	opts.tombstone_threshold = 0.5;
+
+	vy_range_update_compaction_priority(range, &opts, opts.range_size);
+	is(range->compaction_plan.count, 3,
+	   "prefix newest..trigger plus max-ratio slice on next level");
+	ok(range->compaction_plan.is_tombstone, "tombstone flag set");
+	ok(range->compaction_plan.slices[2] == slices[1],
+	   "chose higher tombstone on level+1, not rlist_next");
+	ok(range->compaction_plan.slices[2] != slices[2],
+	   "did not pick immediate older neighbor");
 
 	vy_test_range_delete(range, slices, n);
 	check_plan();
@@ -1271,7 +1378,7 @@ test_tombstone_plan_middle_trigger_plus_older(void)
 int
 main(void)
 {
-	plan(10);
+	plan(12);
 	header();
 
 	vy_iterator_C_test_init(128 * 1024);
@@ -1291,6 +1398,8 @@ main(void)
 	test_tombstone_plan_oldest_trigger();
 	test_tombstone_plan_no_trigger_low_ratio();
 	test_tombstone_plan_middle_trigger_plus_older();
+	test_tombstone_plan_next_level_one_deeper();
+	test_tombstone_plan_next_level_max_ratio();
 
 	key_def_delete(cmp_def);
 	vy_run_env_destroy(&run_env);

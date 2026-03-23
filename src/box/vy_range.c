@@ -664,7 +664,7 @@ vy_compaction_plan_trim(struct vy_range *range,
 
 /**
  * Helper for verbose logging of level disposition in
- * vy_range_compaction_slice_count().  Builds a string like
+ * vy_range_shape_level_pass().  Builds a string like
  *   1: [108,106*,104] (33900), 2: [99,65] (22826)
  * where '*' marks slices with randomized compaction deferral.
  */
@@ -733,35 +733,22 @@ vy_shape_log_emit(struct vy_shape_log *log, struct vy_range *range,
 }
 
 /**
- * To reduce write amplification caused by compaction, we follow
- * the LSM tree design. Runs in each range are divided into groups
- * called levels:
+ * Assign each slice an LSM level (newest-first order) and compute shape
+ * compaction slice count.
  *
- *   level 1: runs 1 .. L_1
- *   level 2: runs L_1 + 1 .. L_2
- *   ...
- *   level N: runs L_{N-1} .. L_N
+ * Verbose shape log (when enabled) is built inside this function.
  *
- * where L_N is the total number of runs, N is the total number of
- * levels, older runs have greater numbers. Runs at each subsequent
- * are run_size_ratio times larger than on the previous one. When
- * the number of runs at a level exceeds run_count_per_level, we
- * compact all its runs along with all runs from the upper levels
- * and in-memory indexes.  Including  previous levels into
- * compaction is relatively cheap, because of the level size
- * ratio.
+ * @param levels If non-NULL, length must be range->slice_count; filled with
+ *               the level index for each slice in rlist_foreach_entry order
+ *               (newest first).  If NULL, levels are not stored (only compact
+ *               count and shape logging matter).
  *
- * Given a range, this function computes the maximal level that
- * needs to be compacted and returns the number of slices in this
- * level and all preceding levels (0 if nothing to do).
- *
- * The algorithm assigns slices to levels by comparing their sizes
- * against a geometrically growing target.  Cascading compactions
- * are avoided by accounting for the estimated output run size.
+ * @return Number of slices to compact for shape (0 = nothing).
  */
 static int
-vy_range_compaction_slice_count(struct vy_range *range,
-				const struct index_opts *opts)
+vy_range_shape_level_pass(struct vy_range *range,
+			  const struct index_opts *opts,
+			  uint32_t *levels)
 {
 	/* Number of slices to compact (0 = nothing to do). */
 	int compact_slice_count = 0;
@@ -800,9 +787,9 @@ vy_range_compaction_slice_count(struct vy_range *range,
 	 * scenario.
 	 */
 	uint64_t target_run_size;
-
 	uint64_t size;
 	struct vy_slice *slice;
+
 	slice = rlist_last_entry(&range->slices, struct vy_slice, in_range);
 	size = MAX(slice->count.bytes, 1);
 	slice = rlist_first_entry(&range->slices, struct vy_slice, in_range);
@@ -815,8 +802,10 @@ vy_range_compaction_slice_count(struct vy_range *range,
 	uint32_t current_level = 1;
 	struct vy_shape_log shape_log;
 	vy_shape_log_create(&shape_log);
+	int idx = 0;
 
 	rlist_foreach_entry(slice, &range->slices, in_range) {
+		assert(idx < range->slice_count);
 		size = slice->count.bytes;
 		level_run_count++;
 		total_run_count++;
@@ -870,6 +859,9 @@ vy_range_compaction_slice_count(struct vy_range *range,
 		if (slice->seed < RAND_MAX / 10)
 			max_run_count++;
 		vy_shape_log_append(&shape_log, current_level, slice);
+		if (levels != NULL)
+			levels[idx] = current_level;
+		idx++;
 		if (level_run_count > max_run_count) {
 			/*
 			 * The number of runs at the current level
@@ -881,6 +873,7 @@ vy_range_compaction_slice_count(struct vy_range *range,
 			est_new_run_size = total_stmt_count.bytes;
 		}
 	}
+	assert(idx == range->slice_count);
 
 	if (level_count > 1 && level_run_count > 1) {
 		/*
@@ -892,8 +885,41 @@ vy_range_compaction_slice_count(struct vy_range *range,
 
 	vy_shape_log_emit(&shape_log, range, current_level,
 			  compact_slice_count);
-
 	return compact_slice_count;
+}
+
+/**
+ * To reduce write amplification caused by compaction, we follow
+ * the LSM tree design. Runs in each range are divided into groups
+ * called levels:
+ *
+ *   level 1: runs 1 .. L_1
+ *   level 2: runs L_1 + 1 .. L_2
+ *   ...
+ *   level N: runs L_{N-1} .. L_N
+ *
+ * where L_N is the total number of runs, N is the total number of
+ * levels, older runs have greater numbers. Runs at each subsequent
+ * are run_size_ratio times larger than on the previous one. When
+ * the number of runs at a level exceeds run_count_per_level, we
+ * compact all its runs along with all runs from the upper levels
+ * and in-memory indexes.  Including  previous levels into
+ * compaction is relatively cheap, because of the level size
+ * ratio.
+ *
+ * Given a range, this function computes the maximal level that
+ * needs to be compacted and returns the number of slices in this
+ * level and all preceding levels (0 if nothing to do).
+ *
+ * The algorithm assigns slices to levels by comparing their sizes
+ * against a geometrically growing target.  Cascading compactions
+ * are avoided by accounting for the estimated output run size.
+ */
+static int
+vy_range_compaction_slice_count(struct vy_range *range,
+				const struct index_opts *opts)
+{
+	return vy_range_shape_level_pass(range, opts, NULL);
 }
 
 /**
@@ -1054,8 +1080,10 @@ vy_compaction_plan_check_bloat(struct vy_range *range)
  * Walk slices from oldest to newest.  The first slice whose
  * estimated delete share (stmt_stat.deletes / count.rows) exceeds
  * @a opts->tombstone_threshold triggers a plan: all slices from
- * the newest down to and including the trigger, plus one older
- * slice if it exists (so adjacent LSM levels merge).
+ * the newest down to and including the trigger, plus one slice
+ * from the next deeper LSM level (shape geometry): among slices
+ * with level == trigger_level + 1, pick the one with the highest
+ * tombstone ratio (ties: first in newest-first order).
  */
 static void
 vy_compaction_plan_check_tombstone(struct vy_range *range,
@@ -1065,14 +1093,15 @@ vy_compaction_plan_check_tombstone(struct vy_range *range,
 
 	if (range->slice_count < 2)
 		return;
-	if (opts->tombstone_threshold >= 1.)
-		return;
 
 	struct vy_slice *trigger = NULL;
 	double trigger_ratio = 0.;
 	struct vy_slice *slice;
+	int trigger_idx = -1;
+	int idx = range->slice_count;
 
 	rlist_foreach_entry_reverse(slice, &range->slices, in_range) {
+		idx--;
 		if (slice->count.rows <= 0)
 			continue;
 		double ratio = (double)slice->stmt_stat.deletes /
@@ -1080,35 +1109,49 @@ vy_compaction_plan_check_tombstone(struct vy_range *range,
 		if (ratio > opts->tombstone_threshold) {
 			trigger = slice;
 			trigger_ratio = ratio;
+			trigger_idx = idx;
 			break;
 		}
 	}
-	if (trigger == NULL)
+	if (trigger == NULL) {
 		return;
+	}
+	assert(trigger_idx >= 0);
+
+	uint32_t *levels = xmalloc(range->slice_count * sizeof(uint32_t));
+	vy_range_shape_level_pass(range, opts, levels);
+	uint32_t trigger_level = levels[trigger_idx];
+	uint32_t next_level = trigger_level + 1;
+	for (int i = trigger_idx + 1; i < range->slice_count; i++) {
+		if (levels[i] != trigger_level) {
+			next_level = levels[i];
+			break;
+		}
+	}
+
+	double best_next_ratio = -1.;
+	idx = 0;
+	rlist_foreach_entry(slice, &range->slices, in_range) {
+		if (levels[idx] == next_level &&
+		    slice->count.rows > 0) {
+			double r = (double)slice->stmt_stat.deletes /
+				   (double)slice->count.rows;
+			if (r > best_next_ratio) {
+				best_next_ratio = r;
+				trigger = slice;
+			}
+		}
+		idx++;
+	}
+	free(levels);
 
 	rlist_foreach_entry(slice, &range->slices, in_range) {
 		vy_compaction_plan_add(plan, slice);
 		if (slice == trigger)
 			break;
 	}
-	/*
-	 * Slices are ordered newest (head) -> oldest (tail).  One step
-	 * toward the tail follows in_range.next; at the tail, next is
-	 * the list head and there is no older slice.
-	 */
-	struct rlist *next_r = rlist_next(&trigger->in_range);
-	struct vy_slice *older = (next_r == &range->slices) ? NULL :
-		rlist_entry(next_r, struct vy_slice, in_range);
-	bool added_older = false;
-	if (older != NULL) {
-		vy_compaction_plan_add(plan, older);
-		added_older = true;
-	}
 
-	struct vy_slice *range_tail = rlist_last_entry(
-		&range->slices, struct vy_slice, in_range);
-	plan->is_last_level =
-		(plan->slices[plan->count - 1] == range_tail);
+	plan->is_last_level = range->compaction_plan.count == range->slice_count;
 	plan->is_tombstone = true;
 
 	vy_compaction_plan_trim(range, opts);
@@ -1118,13 +1161,12 @@ vy_compaction_plan_check_tombstone(struct vy_range *range,
 		plan->is_last_level = false;
 		return;
 	}
-
 	say_verbose("compaction plan for range %s: tombstone compaction "
-		    "scheduled (trigger slice %" PRId64 " ratio %.4f "
-		    "threshold %.4f, %d slices%s)",
-		    vy_range_str(range), trigger->id, trigger_ratio,
-		    opts->tombstone_threshold, plan->count,
-		    added_older ? ", +1 older level" : "");
+			"scheduled (trigger slice %" PRId64 " level %u "
+			"ratio %.4f threshold %.4f, %d slices)",
+			vy_range_str(range), trigger->id,
+			trigger_level, trigger_ratio,
+			opts->tombstone_threshold, plan->count);
 }
 
 /**
