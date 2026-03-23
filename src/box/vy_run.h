@@ -51,6 +51,7 @@ extern "C" {
 
 struct vy_history;
 struct vy_run_reader;
+struct vy_stream_histogram;
 
 /** Part of vinyl environment for run read/write */
 struct vy_run_env {
@@ -141,6 +142,13 @@ struct vy_run {
 	struct vy_disk_stmt_counter count;
 	/** Size of memory used for storing page index. */
 	size_t page_index_size;
+	/**
+	 * Size of encoded DELETE ordinal histogram in the .index file
+	 * (VY_RUN_INFO_STMT_DELETE_HIST payload), or 0 if absent.
+	 */
+	size_t histogram_size;
+	/** Streaming histogram of DELETE statement ordinals; NULL if disabled or empty. */
+	struct vy_stream_histogram *stmt_delete_hist;
 	/** Max LSN stored on disk. */
 	int64_t dump_lsn;
 	/**
@@ -680,6 +688,10 @@ struct vy_run_writer {
 	struct tuple_bloom_builder *bloom;
 	/** Buffer of a current page row offsets. */
 	struct ibuf row_index_buf;
+	/** DELETE count on the current page (reset each start_page). */
+	uint32_t page_delete_count;
+	/** DELETE histogram while writing; moved to run on commit. */
+	struct vy_stream_histogram *delete_hist;
 	/**
 	 * Remember a last written statement to use it as a source
 	 * of max key of a finished run.

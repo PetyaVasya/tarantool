@@ -301,6 +301,7 @@ vy_info_append_memory(struct vy_env *env, struct info_handler *h)
 	info_append_int(h, "tuple_cache", env->cache_env.mem_used);
 	info_append_int(h, "page_index", env->lsm_env.page_index_size);
 	info_append_int(h, "bloom_filter", env->lsm_env.bloom_size);
+	info_append_int(h, "stmt_delete_histogram", env->lsm_env.histogram_size);
 	info_table_end(h); /* memory */
 }
 
@@ -429,6 +430,7 @@ vinyl_index_stat(struct index *index, struct info_handler *h)
 	info_table_end(h); /* compaction */
 	info_append_int(h, "index_size", lsm->page_index_size);
 	info_append_int(h, "bloom_size", lsm->bloom_size);
+	info_append_int(h, "histogram_size", lsm->histogram_size);
 	info_table_end(h); /* disk */
 
 	info_table_begin(h, "cache");
@@ -512,6 +514,7 @@ vinyl_engine_memory_stat(struct engine *engine, struct engine_memory_stat *stat)
 	stat->index += env->mem_env.tree_extent_size;
 	stat->index += env->lsm_env.bloom_size;
 	stat->index += env->lsm_env.page_index_size;
+	stat->index += env->lsm_env.histogram_size;
 	stat->cache += env->cache_env.mem_used;
 	stat->tx += vy_tx_manager_mem_used(env->xm);
 }
@@ -1243,7 +1246,7 @@ vinyl_index_bsize(struct index *index)
 	 */
 	struct vy_lsm *lsm = vy_lsm(index);
 	ssize_t bsize = vy_lsm_mem_tree_size(lsm) +
-		lsm->page_index_size + lsm->bloom_size;
+		lsm->page_index_size + lsm->bloom_size + lsm->histogram_size;
 	if (lsm->index_id > 0)
 		bsize += lsm->stat.disk.count.bytes;
 	return bsize;

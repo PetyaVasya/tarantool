@@ -77,6 +77,9 @@ function istat()
     st.latency = nil
     st.disk.dump.time = nil
     st.disk.compaction.time = nil
+    if st.disk ~= nil and st.disk.histogram_size == nil then
+        st.disk.histogram_size = 0
+    end
     return st
 end;
 
@@ -93,6 +96,9 @@ function gstat()
     st.scheduler.dump_time = nil
     st.scheduler.compaction_time = nil
     st.memory.level0 = nil
+    if st.memory ~= nil and st.memory.stmt_delete_histogram == nil then
+        st.memory.stmt_delete_histogram = 0
+    end
     return st
 end;
 
@@ -395,6 +401,7 @@ i1:bsize() == st1.memory.index_size
 i2:bsize() == st2.memory.index_size
 gst.memory.page_index == 0
 gst.memory.bloom_filter == 0
+gst.memory.stmt_delete_histogram == 0
 gst.disk.data == 0
 gst.disk.index == 0
 
@@ -408,10 +415,11 @@ i1:bsize(), i2:bsize()
 s:bsize() == st1.disk.bytes
 i1:len() == st1.disk.rows
 i2:len() == st2.disk.rows
-i1:bsize() == st1.disk.index_size + st1.disk.bloom_size
-i2:bsize() == st2.disk.index_size + st2.disk.bloom_size + st2.disk.bytes
+i1:bsize() == st1.disk.index_size + st1.disk.bloom_size + st1.disk.histogram_size
+i2:bsize() == st2.disk.index_size + st2.disk.bloom_size + st2.disk.histogram_size + st2.disk.bytes
 gst.memory.page_index == st1.disk.index_size + st2.disk.index_size
 gst.memory.bloom_filter == st1.disk.bloom_size + st2.disk.bloom_size
+gst.memory.stmt_delete_histogram == st1.disk.histogram_size + st2.disk.histogram_size
 gst.disk.data == s:bsize()
 gst.disk.index == i1:bsize() + i2:bsize()
 
@@ -425,8 +433,8 @@ i1:bsize(), i2:bsize()
 s:bsize() == st1.memory.bytes + st1.disk.bytes
 i1:len() == st1.memory.rows + st1.disk.rows
 i2:len() == st2.memory.rows + st2.disk.rows
-i1:bsize() == st1.memory.index_size + st1.disk.index_size + st1.disk.bloom_size
-i2:bsize() == st2.memory.index_size + st2.disk.index_size + st2.disk.bloom_size + st2.disk.bytes
+i1:bsize() == st1.memory.index_size + st1.disk.index_size + st1.disk.bloom_size + st1.disk.histogram_size
+i2:bsize() == st2.memory.index_size + st2.disk.index_size + st2.disk.bloom_size + st2.disk.histogram_size + st2.disk.bytes
 
 -- Compact the primary index first to generate deferred DELETEs.
 -- Then dump them and compact the secondary index.
@@ -445,10 +453,11 @@ i1:bsize(), i2:bsize()
 s:bsize() == st1.disk.bytes
 i1:len() == st1.disk.rows
 i2:len() == st2.disk.rows
-i1:bsize() == st1.disk.index_size + st1.disk.bloom_size
-i2:bsize() == st2.disk.index_size + st2.disk.bloom_size + st2.disk.bytes
+i1:bsize() == st1.disk.index_size + st1.disk.bloom_size + st1.disk.histogram_size
+i2:bsize() == st2.disk.index_size + st2.disk.bloom_size + st2.disk.histogram_size + st2.disk.bytes
 gst.memory.page_index == st1.disk.index_size + st2.disk.index_size
 gst.memory.bloom_filter == st1.disk.bloom_size + st2.disk.bloom_size
+gst.memory.stmt_delete_histogram == st1.disk.histogram_size + st2.disk.histogram_size
 gst.disk.data == s:bsize()
 gst.disk.index == i1:bsize() + i2:bsize()
 
@@ -457,6 +466,7 @@ s:drop()
 gst = gstat()
 gst.memory.page_index == 0
 gst.memory.bloom_filter == 0
+gst.memory.stmt_delete_histogram == 0
 gst.disk.data == 0
 gst.disk.index == 0
 

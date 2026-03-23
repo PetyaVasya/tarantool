@@ -168,6 +168,11 @@ struct index_opts {
 	 */
 	double tombstone_threshold;
 	/**
+	 * Max bins for streaming histogram of DELETE positions in a run;
+	 * 0 disables histogram (legacy slice scaling).
+	 */
+	uint32_t stmt_delete_histogram_max_bins;
+	/**
 	 * zstd compression level. Valid values are from -7 to
 	 * 22, -7 means speed-optimized, and 22 being "ultra"
 	 * compression. The default is 3. Special value 0 means
@@ -238,6 +243,12 @@ index_opts_cmp(const struct index_opts *o1, const struct index_opts *o2)
 	if (o1->tombstone_threshold != o2->tombstone_threshold)
 		return o1->tombstone_threshold < o2->tombstone_threshold ?
 		       -1 : 1;
+	if (o1->stmt_delete_histogram_max_bins !=
+	    o2->stmt_delete_histogram_max_bins)
+		return o1->stmt_delete_histogram_max_bins <
+			       o2->stmt_delete_histogram_max_bins ?
+		       -1 :
+		       1;
 	if (o1->func_id != o2->func_id)
 		return o1->func_id - o2->func_id;
 	if (o1->hint != o2->hint)

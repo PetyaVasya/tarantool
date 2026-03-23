@@ -35,6 +35,7 @@
 extern "C" {
 #endif
 
+#include <stddef.h>
 #include <stdint.h>
 
 /** One bin: observation coordinate @a p and total weight @a count. */
@@ -86,6 +87,18 @@ vy_stream_histogram_merge(struct vy_stream_histogram *h,
  */
 double
 vy_stream_histogram_sum(const struct vy_stream_histogram *h, double b);
+
+/** Msgpack array: max_bin_size, bin_count, then (p, count) pairs. */
+size_t
+vy_stream_histogram_msgpack_size(const struct vy_stream_histogram *h);
+
+char *
+vy_stream_histogram_msgpack_encode(const struct vy_stream_histogram *h,
+				   char *pos);
+
+/** Returns NULL on format error. Advances *data past the value. */
+struct vy_stream_histogram *
+vy_stream_histogram_msgpack_decode(const char **data);
 
 #if defined(__cplusplus)
 } /* extern "C" */

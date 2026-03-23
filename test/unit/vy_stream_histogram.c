@@ -10,6 +10,7 @@
 enum {
 	N_RECORDS = 1000000,
 	WEIGHT_PER_RECORD = 1000,
+	/** Parametrized via test helpers; default stress-test value. */
 	MAX_BINS = 100,
 };
 
@@ -146,6 +147,51 @@ test_million_records_hundred_bins(void)
 	footer();
 }
 
+static void
+test_msgpack_roundtrip(void)
+{
+	header();
+	plan(5);
+	struct vy_stream_histogram *h = vy_stream_histogram_new(40);
+	fail_if(h == NULL);
+	vy_stream_histogram_update_weight(h, 0.0, 10);
+	vy_stream_histogram_update_weight(h, 500.0, 3);
+	size_t sz = vy_stream_histogram_msgpack_size(h);
+	char buf[1024];
+	fail_if(sz > sizeof(buf));
+	char *end = vy_stream_histogram_msgpack_encode(h, buf);
+	ok((size_t)(end - buf) == sz, "encode length matches sizeof");
+	const char *rp = buf;
+	struct vy_stream_histogram *h2 = vy_stream_histogram_msgpack_decode(&rp);
+	fail_if(h2 == NULL);
+	ok((size_t)(rp - buf) == sz, "decode consumes full blob");
+	ok(fabs(vy_stream_histogram_sum(h2, 250.0) -
+	       vy_stream_histogram_sum(h, 250.0)) < 1e-6,
+	   "sum matches after round-trip");
+	ok(h2->max_bin_size == h->max_bin_size && h2->bin_count == h->bin_count,
+	   "bin meta preserved");
+	vy_stream_histogram_delete(h);
+	vy_stream_histogram_delete(h2);
+	footer();
+}
+
+static void
+test_max_bins_parameter_small(void)
+{
+	header();
+	plan(2);
+	const uint32_t max_bins = 32;
+	struct vy_stream_histogram *h = vy_stream_histogram_new(max_bins);
+	fail_if(h == NULL);
+	for (uint32_t i = 0; i < 1000; i++)
+		vy_stream_histogram_update_weight(h, (double)i, 1);
+	ok(h->bin_count <= max_bins, "respects max_bins cap");
+	double s = vy_stream_histogram_sum(h, 999.0);
+	ok(fabs(s - 1000.0) < 50.0, "total mass ~1000");
+	vy_stream_histogram_delete(h);
+	footer();
+}
+
 int
 main(void)
 {
@@ -155,5 +201,7 @@ main(void)
 	test_merge_bins_when_full();
 	test_merge_histograms();
 	test_million_records_hundred_bins();
+	test_msgpack_roundtrip();
+	test_max_bins_parameter_small();
 	return 0;
 }

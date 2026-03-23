@@ -101,6 +101,8 @@ struct vy_lsm_env {
 	size_t bloom_size;
 	/** Size of memory used for page index. */
 	size_t page_index_size;
+	/** Size of encoded DELETE histogram payloads in .index files. */
+	size_t histogram_size;
 	/**
 	 * Size of disk space used for storing data of all spaces,
 	 * in bytes, without taking into account disk compression.
@@ -286,6 +288,8 @@ struct vy_lsm {
 	size_t bloom_size;
 	/** Size of memory used for page index. */
 	size_t page_index_size;
+	/** Size of encoded DELETE histogram payloads in .index files. */
+	size_t histogram_size;
 	/**
 	 * Incremented for each change of the mem list,
 	 * to invalidate iterators.

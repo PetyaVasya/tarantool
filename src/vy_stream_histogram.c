@@ -33,6 +33,8 @@
 
 #include "trivia/util.h"
 
+#include <msgpuck.h>
+
 #include <assert.h>
 #include <float.h>
 
@@ -204,4 +206,59 @@ vy_stream_histogram_sum(const struct vy_stream_histogram *h, double b)
 		sum += (double)bins[i].count;
 
 	return sum;
+}
+
+size_t
+vy_stream_histogram_msgpack_size(const struct vy_stream_histogram *h)
+{
+	if (h == NULL || h->bin_count == 0)
+		return 0;
+	uint32_t bc = h->bin_count;
+	size_t s = mp_sizeof_array(2 + 2 * bc);
+	s += mp_sizeof_uint(h->max_bin_size);
+	s += mp_sizeof_uint(bc);
+	for (uint32_t i = 0; i < bc; i++) {
+		s += mp_sizeof_double(h->bins[i].p);
+		s += mp_sizeof_uint(h->bins[i].count);
+	}
+	return s;
+}
+
+char *
+vy_stream_histogram_msgpack_encode(const struct vy_stream_histogram *h, char *pos)
+{
+	assert(h != NULL && h->bin_count > 0);
+	uint32_t bc = h->bin_count;
+	pos = mp_encode_array(pos, 2 + 2 * bc);
+	pos = mp_encode_uint(pos, h->max_bin_size);
+	pos = mp_encode_uint(pos, bc);
+	for (uint32_t i = 0; i < bc; i++) {
+		pos = mp_encode_double(pos, h->bins[i].p);
+		pos = mp_encode_uint(pos, h->bins[i].count);
+	}
+	return pos;
+}
+
+struct vy_stream_histogram *
+vy_stream_histogram_msgpack_decode(const char **data)
+{
+	const char *p = *data;
+	uint32_t n = mp_decode_array(&p);
+	if (n < 2 || (n - 2) % 2 != 0)
+		return NULL;
+	uint32_t max_bin_size = mp_decode_uint(&p);
+	uint32_t bin_count = mp_decode_uint(&p);
+	if (max_bin_size < 1 || bin_count > max_bin_size ||
+	    2 + 2 * bin_count != n)
+		return NULL;
+	struct vy_stream_histogram *h = vy_stream_histogram_new(max_bin_size);
+	if (h == NULL)
+		return NULL;
+	for (uint32_t i = 0; i < bin_count; i++) {
+		h->bins[i].p = mp_decode_double(&p);
+		h->bins[i].count = mp_decode_uint(&p);
+	}
+	h->bin_count = bin_count;
+	*data = p;
+	return h;
 }

@@ -1396,6 +1396,7 @@ local index_options = {
     page_size = 'number',
     bloom_fpr = 'number',
     tombstone_threshold = 'number',
+    stmt_delete_histogram_max_bins = 'number',
     compression_level = 'number',
     func = 'number, string',
     hint = 'boolean',
@@ -1494,6 +1495,7 @@ box.schema.index.create = function(space_id, name, options)
             run_size_ratio = box.cfg.vinyl_run_size_ratio,
             bloom_fpr = box.cfg.vinyl_bloom_fpr,
             tombstone_threshold = 1.0,
+            stmt_delete_histogram_max_bins = 0,
             compression_level = box.cfg.vinyl_compression_level,
         }
     else
@@ -1542,6 +1544,8 @@ box.schema.index.create = function(space_id, name, options)
             run_size_ratio = options.run_size_ratio,
             bloom_fpr = options.bloom_fpr,
             tombstone_threshold = options.tombstone_threshold,
+            stmt_delete_histogram_max_bins =
+                options.stmt_delete_histogram_max_bins,
             compression_level = options.compression_level,
             func = options.func,
             hint = options.hint,

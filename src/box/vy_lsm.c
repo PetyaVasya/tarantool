@@ -725,6 +725,7 @@ vy_lsm_add_run(struct vy_lsm *lsm, struct vy_run *run)
 	struct vy_lsm_env *env = lsm->env;
 	size_t bloom_size = vy_run_bloom_size(run);
 	size_t page_index_size = run->page_index_size;
+	size_t histogram_size = run->histogram_size;
 
 	assert(rlist_empty(&run->in_lsm));
 	rlist_add_entry(&lsm->runs, run, in_lsm);
@@ -734,15 +735,17 @@ vy_lsm_add_run(struct vy_lsm *lsm, struct vy_run *run)
 
 	lsm->bloom_size += bloom_size;
 	lsm->page_index_size += page_index_size;
+	lsm->histogram_size += histogram_size;
 
 	env->bloom_size += bloom_size;
 	env->page_index_size += page_index_size;
+	env->histogram_size += histogram_size;
 
 	/* Data size is consistent with space.bsize. */
 	if (lsm->index_id == 0)
 		env->disk_data_size += run->count.bytes;
 	/* Index size is consistent with index.bsize. */
-	env->disk_index_size += bloom_size + page_index_size;
+	env->disk_index_size += bloom_size + page_index_size + histogram_size;
 	if (lsm->index_id > 0)
 		env->disk_index_size += run->count.bytes;
 }
@@ -753,6 +756,7 @@ vy_lsm_remove_run(struct vy_lsm *lsm, struct vy_run *run)
 	struct vy_lsm_env *env = lsm->env;
 	size_t bloom_size = vy_run_bloom_size(run);
 	size_t page_index_size = run->page_index_size;
+	size_t histogram_size = run->histogram_size;
 
 	assert(lsm->run_count > 0);
 	assert(!rlist_empty(&run->in_lsm));
@@ -763,15 +767,17 @@ vy_lsm_remove_run(struct vy_lsm *lsm, struct vy_run *run)
 
 	lsm->bloom_size -= bloom_size;
 	lsm->page_index_size -= page_index_size;
+	lsm->histogram_size -= histogram_size;
 
 	env->bloom_size -= bloom_size;
 	env->page_index_size -= page_index_size;
+	env->histogram_size -= histogram_size;
 
 	/* Data size is consistent with space.bsize. */
 	if (lsm->index_id == 0)
 		env->disk_data_size -= run->count.bytes;
 	/* Index size is consistent with index.bsize. */
-	env->disk_index_size -= bloom_size + page_index_size;
+	env->disk_index_size -= bloom_size + page_index_size + histogram_size;
 	if (lsm->index_id > 0)
 		env->disk_index_size -= run->count.bytes;
 }

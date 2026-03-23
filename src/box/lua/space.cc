@@ -518,6 +518,10 @@ lbox_fillspace(struct lua_State *L, struct space *space, int i)
 			lua_pushnumber(L, index_opts->tombstone_threshold);
 			lua_setfield(L, -2, "tombstone_threshold");
 
+			lua_pushnumber(L,
+				       index_opts->stmt_delete_histogram_max_bins);
+			lua_setfield(L, -2, "stmt_delete_histogram_max_bins");
+
 			lua_pushnumber(L, index_opts->compression_level);
 			lua_setfield(L, -2, "compression_level");
 			lua_settable(L, -3);

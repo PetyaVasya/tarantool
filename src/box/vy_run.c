@@ -44,6 +44,8 @@
 #include "xlog.h"
 #include "xrow.h"
 #include "vy_history.h"
+#include "vy_stmt.h"
+#include "vy_stream_histogram.h"
 
 static const uint64_t vy_page_info_key_map = (1 << VY_PAGE_INFO_OFFSET) |
 					     (1 << VY_PAGE_INFO_SIZE) |
@@ -290,6 +292,11 @@ vy_run_new(struct vy_run_env *env, int64_t id)
 static void
 vy_run_clear(struct vy_run *run)
 {
+	if (run->stmt_delete_hist != NULL) {
+		vy_stream_histogram_delete(run->stmt_delete_hist);
+		run->stmt_delete_hist = NULL;
+	}
+	run->histogram_size = 0;
 	if (run->page_info != NULL) {
 		uint32_t page_no;
 		for (page_no = 0; page_no < run->info.page_count; ++page_no)
@@ -590,15 +597,18 @@ tuple_bloom_version_to_iproto(enum tuple_bloom_version version)
  * @retval  0 success
  * @retval -1 error (check diag)
  */
-int
-vy_run_info_decode(struct vy_run_info *run_info,
+static int
+vy_run_info_decode(struct vy_run *run,
 		   const struct xrow_header *xrow,
 		   const char *filename)
 {
 	assert(xrow->type == VY_INDEX_RUN_INFO);
+	struct vy_run_info *run_info = &run->info;
 	/* decode run */
 	const char *pos = xrow->body->iov_base;
 	memset(run_info, 0, sizeof(*run_info));
+	run->stmt_delete_hist = NULL;
+	run->histogram_size = 0;
 	uint64_t key_map = vy_run_info_key_map;
 	uint32_t map_size = mp_decode_map(&pos);
 	uint32_t map_item;
@@ -635,6 +645,23 @@ vy_run_info_decode(struct vy_run_info *run_info,
 		case VY_RUN_INFO_STMT_STAT:
 			vy_stmt_stat_decode(&run_info->stmt_stat, &pos);
 			break;
+		case VY_RUN_INFO_STMT_DELETE_HIST: {
+			const char *hist_pos = pos;
+			mp_next(&pos);
+			run->histogram_size =
+				(size_t)((const char *)pos - hist_pos);
+			const char *rp = hist_pos;
+			run->stmt_delete_hist =
+				vy_stream_histogram_msgpack_decode(&rp);
+			if (run->stmt_delete_hist == NULL ||
+			    rp != pos) {
+				diag_set(ClientError, ER_INVALID_INDEX_FILE,
+					 filename,
+					 "invalid per-page stmt delete histogram");
+				return -1;
+			}
+			break;
+		}
 		default:
 			mp_next(&pos); /* unknown key, ignore */
 			break;
@@ -1642,7 +1669,7 @@ vy_run_recover(struct vy_run *run, const char *dir,
 		goto fail_close;
 	}
 
-	if (vy_run_info_decode(&run->info, &xrow, path) != 0)
+	if (vy_run_info_decode(run, &xrow, path) != 0)
 		goto fail_close;
 
 	/* Allocate buffer for page info. */
@@ -1907,16 +1934,16 @@ vy_stmt_stat_encode(const struct vy_stmt_stat *stat, char *buf)
  * Encode vy_run_info as xrow
  * Allocates using region alloc
  *
- * @param run_info the run information
+ * @param run run (including optional stmt delete histogram)
  * @param xrow xrow to fill.
  *
  * @retval  0 success
  * @retval -1 on error, check diag
  */
 static int
-vy_run_info_encode(const struct vy_run_info *run_info,
-		   struct xrow_header *xrow)
+vy_run_info_encode(struct vy_run *run, struct xrow_header *xrow)
 {
+	struct vy_run_info *run_info = &run->info;
 	const char *tmp;
 	tmp = run_info->min_key;
 	mp_next(&tmp);
@@ -1932,6 +1959,14 @@ vy_run_info_encode(const struct vy_run_info *run_info,
 		bloom_key = tuple_bloom_version_to_iproto(
 			run_info->bloom->version);
 	}
+	bool has_hist = run->stmt_delete_hist != NULL &&
+			run->stmt_delete_hist->bin_count > 0;
+	size_t hist_sz = 0;
+	if (has_hist)
+		hist_sz = vy_stream_histogram_msgpack_size(run->stmt_delete_hist);
+	run->histogram_size = has_hist ? hist_sz : 0;
+	if (has_hist)
+		key_count++;
 
 	size_t size = mp_sizeof_map(key_count);
 	size += mp_sizeof_uint(VY_RUN_INFO_MIN_KEY) + min_key_size;
@@ -1947,6 +1982,9 @@ vy_run_info_encode(const struct vy_run_info *run_info,
 			tuple_bloom_size(run_info->bloom);
 	size += mp_sizeof_uint(VY_RUN_INFO_STMT_STAT) +
 		vy_stmt_stat_sizeof(&run_info->stmt_stat);
+	if (has_hist)
+		size += mp_sizeof_uint(VY_RUN_INFO_STMT_DELETE_HIST) +
+			hist_sz;
 
 	char *pos = region_alloc(&fiber()->gc, size);
 	if (pos == NULL) {
@@ -1975,6 +2013,11 @@ vy_run_info_encode(const struct vy_run_info *run_info,
 	}
 	pos = mp_encode_uint(pos, VY_RUN_INFO_STMT_STAT);
 	pos = vy_stmt_stat_encode(&run_info->stmt_stat, pos);
+	if (has_hist) {
+		pos = mp_encode_uint(pos, VY_RUN_INFO_STMT_DELETE_HIST);
+		pos = vy_stream_histogram_msgpack_encode(run->stmt_delete_hist,
+							 pos);
+	}
 	xrow->body->iov_len = (void *)pos - xrow->body->iov_base;
 	xrow->bodycnt = 1;
 	xrow->type = VY_INDEX_RUN_INFO;
@@ -2011,7 +2054,7 @@ vy_run_write_index(struct vy_run *run, const char *dirpath,
 	size_t mem_used = region_used(region);
 
 	struct xrow_header xrow;
-	if (vy_run_info_encode(&run->info, &xrow) != 0 ||
+	if (vy_run_info_encode(run, &xrow) != 0 ||
 	    xlog_write_row(&index_xlog, &xrow) < 0)
 		goto fail_rollback;
 
@@ -2064,6 +2107,14 @@ vy_run_writer_create(struct vy_run_writer *writer, struct vy_run *run,
 	writer->cmp_def = cmp_def;
 	writer->key_def = key_def;
 	writer->index_opts = *index_opts;
+	writer->page_delete_count = 0;
+	writer->delete_hist = NULL;
+	if (writer->index_opts.stmt_delete_histogram_max_bins > 0) {
+		writer->delete_hist = vy_stream_histogram_new(
+			writer->index_opts.stmt_delete_histogram_max_bins);
+		if (writer->delete_hist == NULL)
+			return -1;
+	}
 	if (writer->index_opts.bloom_fpr < 1) {
 		writer->bloom = tuple_bloom_builder_new(key_def->part_count);
 		if (writer->bloom == NULL)
@@ -2137,6 +2188,7 @@ vy_run_writer_start_page(struct vy_run_writer *writer,
 	vy_page_info_create(page, writer->data_xlog.offset, key,
 			    writer->cmp_def);
 	run->info.page_count++;
+	writer->page_delete_count = 0;
 	xlog_tx_begin(&writer->data_xlog);
 	return 0;
 }
@@ -2175,6 +2227,8 @@ vy_run_writer_write_to_page(struct vy_run_writer *writer, struct vy_entry entry)
 	run->info.min_lsn = MIN(run->info.min_lsn, lsn);
 	run->info.max_lsn = MAX(run->info.max_lsn, lsn);
 	vy_stmt_stat_acct(&run->info.stmt_stat, vy_stmt_type(entry.stmt));
+	if (vy_stmt_type(entry.stmt) == IPROTO_DELETE)
+		writer->page_delete_count++;
 	return 0;
 }
 
@@ -2212,6 +2266,12 @@ vy_run_writer_end_page(struct vy_run_writer *writer)
 		return -1;
 	page->size = written;
 	vy_run_acct_page(run, page);
+	if (writer->delete_hist != NULL) {
+		uint32_t page_no = run->info.page_count - 1;
+		vy_stream_histogram_update_weight(writer->delete_hist,
+						  (double)page_no,
+						  writer->page_delete_count);
+	}
 	ibuf_reset(&writer->row_index_buf);
 	return 0;
 }
@@ -2254,6 +2314,10 @@ vy_run_writer_destroy(struct vy_run_writer *writer, bool reuse_fd)
 		xlog_close(&writer->data_xlog, reuse_fd);
 	if (writer->bloom != NULL)
 		tuple_bloom_builder_delete(writer->bloom);
+	if (writer->delete_hist != NULL) {
+		vy_stream_histogram_delete(writer->delete_hist);
+		writer->delete_hist = NULL;
+	}
 	ibuf_destroy(&writer->row_index_buf);
 }
 
@@ -2300,6 +2364,16 @@ vy_run_writer_commit(struct vy_run_writer *writer)
 	if (writer->bloom != NULL)
 		run->info.bloom = tuple_bloom_new(writer->bloom,
 						  writer->index_opts.bloom_fpr);
+
+	if (writer->delete_hist != NULL) {
+		if (writer->delete_hist->bin_count > 0) {
+			run->stmt_delete_hist = writer->delete_hist;
+			writer->delete_hist = NULL;
+		} else {
+			vy_stream_histogram_delete(writer->delete_hist);
+			writer->delete_hist = NULL;
+		}
+	}
 
 	/* Shrink to fit actual size. */
 	uint32_t page_count = run->info.page_count;

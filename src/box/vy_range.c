@@ -51,6 +51,7 @@
 #include "vy_run.h"
 #include "vy_stat.h"
 #include "vy_stmt.h"
+#include "vy_stream_histogram.h"
 
 int
 vy_range_tree_cmp(struct vy_range *range_a, struct vy_range *range_b)
@@ -468,8 +469,26 @@ vy_range_init_slice(struct vy_range *range, struct vy_slice *slice)
 		(uint64_t)st->inserts * slice_pages, run_pages);
 	slice->stmt_stat.replaces = DIV_ROUND_UP(
 		(uint64_t)st->replaces * slice_pages, run_pages);
-	slice->stmt_stat.deletes = DIV_ROUND_UP(
-		(uint64_t)st->deletes * slice_pages, run_pages);
+	if (run->stmt_delete_hist != NULL &&
+	    run->stmt_delete_hist->bin_count > 0) {
+		uint32_t first = slice->first_page_no;
+		uint32_t last = slice->last_page_no;
+		double hi_b = (double)last;
+		double lo_b = first > 0 ? (double)(first - 1) : -1.;
+		double del_est =
+			vy_stream_histogram_sum(run->stmt_delete_hist, hi_b) -
+			vy_stream_histogram_sum(run->stmt_delete_hist, lo_b);
+		if (del_est < 0)
+			del_est = 0;
+		uint64_t del64 = (uint64_t)llround(del_est);
+		uint64_t max_del = slice->count.rows;
+		if (del64 > max_del)
+			del64 = max_del;
+		slice->stmt_stat.deletes = del64;
+	} else {
+		slice->stmt_stat.deletes = DIV_ROUND_UP(
+			(uint64_t)st->deletes * slice_pages, run_pages);
+	}
 	slice->stmt_stat.upserts = DIV_ROUND_UP(
 		(uint64_t)st->upserts * slice_pages, run_pages);
 	run->referenced_pages += slice->count.pages;

@@ -247,6 +247,11 @@ index_opts_decode(struct index_opts *opts, const char *map,
 			 "tombstone_threshold must be within range (0..1]");
 		return -1;
 	}
+	if (opts->stmt_delete_histogram_max_bins > 1000000) {
+		diag_set(ClientError, ER_WRONG_INDEX_OPTIONS,
+			 "stmt_delete_histogram_max_bins must be <= 1000000");
+		return -1;
+	}
 	if (opts->compression_level < -7 || opts->compression_level > 22) {
 		diag_set(ClientError, ER_WRONG_INDEX_OPTIONS,
 			 "compression_level must within range [-7..22]");
