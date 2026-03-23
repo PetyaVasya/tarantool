@@ -161,6 +161,13 @@ struct index_opts {
 	/* Bloom filter false positive rate. */
 	double bloom_fpr;
 	/**
+	 * When the estimated share of DELETE statements in a slice
+	 * (deletes / rows) exceeds this value, tombstone-driven
+	 * compaction may be scheduled. Range [0, 1]; default 1.0
+	 * disables the feature.
+	 */
+	double tombstone_threshold;
+	/**
 	 * zstd compression level. Valid values are from -7 to
 	 * 22, -7 means speed-optimized, and 22 being "ultra"
 	 * compression. The default is 3. Special value 0 means
@@ -228,6 +235,9 @@ index_opts_cmp(const struct index_opts *o1, const struct index_opts *o2)
 		return o1->run_size_ratio < o2->run_size_ratio ? -1 : 1;
 	if (o1->bloom_fpr != o2->bloom_fpr)
 		return o1->bloom_fpr < o2->bloom_fpr ? -1 : 1;
+	if (o1->tombstone_threshold != o2->tombstone_threshold)
+		return o1->tombstone_threshold < o2->tombstone_threshold ?
+		       -1 : 1;
 	if (o1->func_id != o2->func_id)
 		return o1->func_id - o2->func_id;
 	if (o1->hint != o2->hint)
