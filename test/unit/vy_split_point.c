@@ -34,11 +34,14 @@
 #include "trivia/util.h"
 #include "vy_range.h"
 #include "vy_run.h"
+#include <fcntl.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <msgpuck.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <time.h>
+#include <unistd.h>
 
 static struct key_def *cmp_def;
 static struct vy_run_env run_env;
@@ -1375,10 +1378,56 @@ test_tombstone_plan_next_level_max_ratio(void)
 	footer();
 }
 
+static void
+test_tombstone_plan_ttl_trigger_from_file_age(void)
+{
+	header();
+	plan(3);
+	int n;
+	struct vy_slice **slices;
+	struct vy_range *range =
+		vy_test_range_new(tombstone_overlap_specs, &slices, &n);
+	for (int i = 0; i < n; i++) {
+		slices[i]->count.rows = 100;
+		slices[i]->stmt_stat.deletes = 0;
+	}
+	slices[0]->stmt_stat.deletes = 80;
+
+	char path[] = "/tmp/vy_ttl_test_XXXXXX";
+	int fd = mkstemp(path);
+	fail_if(fd < 0);
+	unlink(path);
+	struct timespec ts[2];
+	time_t now = time(NULL);
+	ts[0].tv_sec = now - 1000;
+	ts[0].tv_nsec = 0;
+	ts[1].tv_sec = now - 1000;
+	ts[1].tv_nsec = 0;
+	fail_if(futimens(fd, ts) != 0);
+	slices[0]->run->fd = fd;
+	slices[0]->run->info.creation_time = (double)time(NULL) - 1000;
+
+	struct index_opts opts;
+	index_opts_create(&opts);
+	opts.run_count_per_level = 100;
+	opts.run_size_ratio = 2;
+	opts.range_size = 1024LL * 1024 * 1024;
+	opts.tombstone_threshold = 0.5;
+	opts.tombstone_compaction_ttl = 1;
+
+	vy_range_update_compaction_priority(range, &opts, opts.range_size);
+	is(range->compaction_plan.count, 3, "ttl trigger schedules tombstone plan");
+	ok(range->compaction_plan.is_tombstone, "tombstone flag set by ttl");
+
+	vy_test_range_delete(range, slices, n);
+	check_plan();
+	footer();
+}
+
 int
 main(void)
 {
-	plan(12);
+	plan(13);
 	header();
 
 	vy_iterator_C_test_init(128 * 1024);
@@ -1400,6 +1449,7 @@ main(void)
 	test_tombstone_plan_middle_trigger_plus_older();
 	test_tombstone_plan_next_level_one_deeper();
 	test_tombstone_plan_next_level_max_ratio();
+	test_tombstone_plan_ttl_trigger_from_file_age();
 
 	key_def_delete(cmp_def);
 	vy_run_env_destroy(&run_env);

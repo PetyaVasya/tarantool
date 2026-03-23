@@ -2043,6 +2043,46 @@ fail:
 
 }
 
+static bool
+vy_scheduler_has_periodic_refresh(struct vy_scheduler *scheduler)
+{
+	struct heap_iterator it;
+	vy_compaction_heap_iterator_init(&scheduler->compaction_heap, &it);
+	struct vy_lsm *lsm;
+	while ((lsm = vy_compaction_heap_iterator_next(&it)) != NULL) {
+		if (lsm->opts.compaction_priority_refresh_interval > 0)
+			return true;
+	}
+	return false;
+}
+
+static void
+vy_scheduler_refresh_compaction_priorities(struct vy_scheduler *scheduler,
+					   double now)
+{
+	struct heap_iterator it;
+	vy_compaction_heap_iterator_init(&scheduler->compaction_heap, &it);
+	struct vy_lsm *lsm;
+	while ((lsm = vy_compaction_heap_iterator_next(&it)) != NULL) {
+		double interval = lsm->opts.compaction_priority_refresh_interval;
+		if (interval <= 0)
+			continue;
+		if (lsm->last_priority_refresh_time > 0 &&
+		    now - lsm->last_priority_refresh_time < interval)
+			continue;
+		lsm->last_priority_refresh_time = now;
+		struct vy_range *range = vy_range_tree_first(&lsm->range_tree);
+		while (range != NULL) {
+			struct vy_range *next =
+				vy_range_tree_next(&lsm->range_tree, range);
+			if (!heap_node_is_stray(&range->heap_node))
+				vy_lsm_update_range(lsm, range, NULL, NULL);
+			range = next;
+		}
+		vy_scheduler_update_lsm(scheduler, lsm);
+	}
+}
+
 static int
 vy_task_complete(struct vy_task *task)
 {
@@ -2130,6 +2170,8 @@ vy_scheduler_f(va_list va)
 		/* Throttle for a while if a task failed. */
 		if (tasks_failed > 0)
 			goto error;
+		vy_scheduler_refresh_compaction_priorities(
+			scheduler, ev_monotonic_now(loop()));
 		/* Get a task to schedule. */
 		int64_t gen_before_schedule = scheduler->generation;
 		if (vy_schedule(scheduler, &task) != 0)
@@ -2147,8 +2189,14 @@ vy_scheduler_f(va_list va)
 			 * Recheck before sleeping.
 			 */
 			if (stailq_empty(&scheduler->processed_tasks) &&
-			    scheduler->generation == gen_before_schedule)
-				fiber_cond_wait(&scheduler->scheduler_cond);
+			    scheduler->generation == gen_before_schedule) {
+				if (vy_scheduler_has_periodic_refresh(scheduler))
+					fiber_cond_wait_timeout(
+						&scheduler->scheduler_cond, 1.0);
+				else
+					fiber_cond_wait(
+						&scheduler->scheduler_cond);
+			}
 			continue;
 		}
 

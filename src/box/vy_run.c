@@ -31,6 +31,7 @@
 #include "vy_run.h"
 
 #include <zstd.h>
+#include <time.h>
 
 #include "fiber.h"
 #include "fiber_cond.h"
@@ -58,7 +59,8 @@ static const uint64_t vy_run_info_key_map = (1 << VY_RUN_INFO_MIN_KEY) |
 					    (1 << VY_RUN_INFO_MAX_KEY) |
 					    (1 << VY_RUN_INFO_MIN_LSN) |
 					    (1 << VY_RUN_INFO_MAX_LSN) |
-					    (1 << VY_RUN_INFO_PAGE_COUNT);
+					    (1 << VY_RUN_INFO_PAGE_COUNT) |
+					    (1 << VY_RUN_INFO_CREATION_TIME);
 
 /** xlog meta type for .run files */
 #define XLOG_META_TYPE_RUN "RUN"
@@ -662,6 +664,13 @@ vy_run_info_decode(struct vy_run *run,
 			}
 			break;
 		}
+		case VY_RUN_INFO_CREATION_TIME:
+			if (mp_typeof(*pos) == MP_DOUBLE)
+				run_info->creation_time = mp_decode_double(&pos);
+			else
+				run_info->creation_time =
+					(double)mp_decode_uint(&pos);
+			break;
 		default:
 			mp_next(&pos); /* unknown key, ignore */
 			break;
@@ -1944,6 +1953,8 @@ static int
 vy_run_info_encode(struct vy_run *run, struct xrow_header *xrow)
 {
 	struct vy_run_info *run_info = &run->info;
+	if (run_info->creation_time <= 0)
+		run_info->creation_time = (double)time(NULL);
 	const char *tmp;
 	tmp = run_info->min_key;
 	mp_next(&tmp);
@@ -1952,7 +1963,7 @@ vy_run_info_encode(struct vy_run *run, struct xrow_header *xrow)
 	mp_next(&tmp);
 	size_t max_key_size = tmp - run_info->max_key;
 
-	uint32_t key_count = 6;
+	uint32_t key_count = 7;
 	uint32_t bloom_key = 0;
 	if (run_info->bloom != NULL) {
 		key_count++;
@@ -1982,6 +1993,8 @@ vy_run_info_encode(struct vy_run *run, struct xrow_header *xrow)
 			tuple_bloom_size(run_info->bloom);
 	size += mp_sizeof_uint(VY_RUN_INFO_STMT_STAT) +
 		vy_stmt_stat_sizeof(&run_info->stmt_stat);
+	size += mp_sizeof_uint(VY_RUN_INFO_CREATION_TIME) +
+		mp_sizeof_double(run_info->creation_time);
 	if (has_hist)
 		size += mp_sizeof_uint(VY_RUN_INFO_STMT_DELETE_HIST) +
 			hist_sz;
@@ -2013,6 +2026,8 @@ vy_run_info_encode(struct vy_run *run, struct xrow_header *xrow)
 	}
 	pos = mp_encode_uint(pos, VY_RUN_INFO_STMT_STAT);
 	pos = vy_stmt_stat_encode(&run_info->stmt_stat, pos);
+	pos = mp_encode_uint(pos, VY_RUN_INFO_CREATION_TIME);
+	pos = mp_encode_double(pos, run_info->creation_time);
 	if (has_hist) {
 		pos = mp_encode_uint(pos, VY_RUN_INFO_STMT_DELETE_HIST);
 		pos = vy_stream_histogram_msgpack_encode(run->stmt_delete_hist,
@@ -2389,6 +2404,7 @@ vy_run_writer_commit(struct vy_run_writer *writer)
 		goto out;
 
 	run->fd = writer->data_xlog.fd;
+	run->info.creation_time = (double)time(NULL);
 	vy_run_writer_destroy(writer, true);
 	rc = 0;
 out:

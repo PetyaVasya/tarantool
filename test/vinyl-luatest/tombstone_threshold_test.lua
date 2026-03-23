@@ -48,5 +48,32 @@ g.test_tombstone_threshold_default = function(cg)
         local s = box.schema.space.create('test', {engine = 'vinyl'})
         s:create_index('pk', {run_count_per_level = 100})
         t.assert_equals(s.index.pk.options.tombstone_threshold, 1.0)
+        t.assert_equals(s.index.pk.options.tombstone_compaction_ttl, 0)
+        t.assert_equals(s.index.pk.options.compaction_priority_refresh_interval, 0)
+    end)
+end
+
+g.test_fade_options_invalid = function(cg)
+    cg.server:exec(function()
+        local s = box.schema.space.create('test', {engine = 'vinyl'})
+        t.assert_error_msg_contains('tombstone_compaction_ttl', function()
+            s:create_index('pk', {tombstone_compaction_ttl = -1})
+        end)
+        t.assert_error_msg_contains('compaction_priority_refresh_interval', function()
+            s:create_index('pk', {compaction_priority_refresh_interval = -1})
+        end)
+    end)
+end
+
+g.test_fade_options_create_and_options = function(cg)
+    cg.server:exec(function()
+        local s = box.schema.space.create('test', {engine = 'vinyl'})
+        s:create_index('pk', {
+            run_count_per_level = 100,
+            tombstone_compaction_ttl = 60,
+            compaction_priority_refresh_interval = 5,
+        })
+        t.assert_equals(s.index.pk.options.tombstone_compaction_ttl, 60)
+        t.assert_equals(s.index.pk.options.compaction_priority_refresh_interval, 5)
     end)
 end

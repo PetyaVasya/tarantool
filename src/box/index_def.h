@@ -173,6 +173,17 @@ struct index_opts {
 	 */
 	uint32_t stmt_delete_histogram_max_bins;
 	/**
+	 * Target time (in seconds) for a tombstone-heavy slice to
+	 * reach the last level within one range. 0 disables TTL-driven
+	 * tombstone scheduling.
+	 */
+	double tombstone_compaction_ttl;
+	/**
+	 * Interval (in seconds) for periodic compaction priority refresh.
+	 * 0 disables the periodic trigger.
+	 */
+	double compaction_priority_refresh_interval;
+	/**
 	 * zstd compression level. Valid values are from -7 to
 	 * 22, -7 means speed-optimized, and 22 being "ultra"
 	 * compression. The default is 3. Special value 0 means
@@ -247,6 +258,17 @@ index_opts_cmp(const struct index_opts *o1, const struct index_opts *o2)
 	    o2->stmt_delete_histogram_max_bins)
 		return o1->stmt_delete_histogram_max_bins <
 			       o2->stmt_delete_histogram_max_bins ?
+		       -1 :
+		       1;
+	if (o1->tombstone_compaction_ttl != o2->tombstone_compaction_ttl)
+		return o1->tombstone_compaction_ttl <
+				       o2->tombstone_compaction_ttl ?
+		       -1 :
+		       1;
+	if (o1->compaction_priority_refresh_interval !=
+	    o2->compaction_priority_refresh_interval)
+		return o1->compaction_priority_refresh_interval <
+				       o2->compaction_priority_refresh_interval ?
 		       -1 :
 		       1;
 	if (o1->func_id != o2->func_id)

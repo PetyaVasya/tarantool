@@ -212,6 +212,11 @@ struct vy_lsm {
 	uint32_t group_id;
 	/** Index options. */
 	struct index_opts opts;
+	/**
+	 * Last monotonic timestamp when periodic compaction-priority
+	 * refresh was performed for this LSM tree.
+	 */
+	double last_priority_refresh_time;
 	/** Key definition used to compare tuples. */
 	struct key_def *cmp_def;
 	/** Key definition passed by the user. */

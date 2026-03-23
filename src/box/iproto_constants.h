@@ -587,6 +587,8 @@ request_replace_body_create(struct request_replace_body *body,
 	_(STMT_STAT, 8)							\
 	/** Legacy: DELETE histogram by stmt ordinal (optional, ignored). */ \
 	_(STMT_DELETE_HIST, 9)						\
+	/** Run creation timestamp (seconds since epoch). */		\
+	_(CREATION_TIME, 10)						\
 
 #define VY_RUN_INFO_KEY_MEMBER(s, v) VY_RUN_INFO_ ## s = v,
 

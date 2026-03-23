@@ -37,6 +37,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 #define RB_COMPACT 1
 #include <small/rb.h>
@@ -1093,6 +1094,33 @@ vy_compaction_plan_check_bloat(struct vy_range *range)
 	}
 }
 
+static bool
+vy_slice_file_age_seconds(struct vy_slice *slice, double *age)
+{
+	if (slice->run->info.creation_time <= 0)
+		return false;
+	double now = (double)time(NULL);
+	if (now <= slice->run->info.creation_time) {
+		*age = 0;
+		return true;
+	}
+	*age = now - slice->run->info.creation_time;
+	return true;
+}
+
+static inline double
+vy_fade_level_ttl(double dth, double size_ratio, uint32_t level,
+		  uint32_t level_count)
+{
+	if (dth <= 0 || size_ratio <= 1 || level_count == 0)
+		return INFINITY;
+	double denom = pow(size_ratio, level_count) - 1.0;
+	if (denom <= 0)
+		return INFINITY;
+	double d0 = dth * (size_ratio - 1.0) / denom;
+	return d0 * pow(size_ratio, level - 1);
+}
+
 /**
  * Tombstone-ratio driven compaction (lowest priority).
  *
@@ -1118,27 +1146,45 @@ vy_compaction_plan_check_tombstone(struct vy_range *range,
 	struct vy_slice *slice;
 	int trigger_idx = -1;
 	int idx = range->slice_count;
+	bool trigger_by_ttl = false;
+
+	uint32_t *levels = xmalloc(range->slice_count * sizeof(uint32_t));
+	vy_range_shape_level_pass(range, opts, levels);
+	uint32_t level_count = levels[range->slice_count - 1];
 
 	rlist_foreach_entry_reverse(slice, &range->slices, in_range) {
 		idx--;
-		if (slice->count.rows <= 0)
+		if (slice->count.rows <= 0) {
 			continue;
+		}
 		double ratio = (double)slice->stmt_stat.deletes /
 			       (double)slice->count.rows;
-		if (ratio > opts->tombstone_threshold) {
-			trigger = slice;
-			trigger_ratio = ratio;
-			trigger_idx = idx;
-			break;
+		bool ratio_trigger = ratio > opts->tombstone_threshold;
+		bool ttl_trigger = opts->tombstone_compaction_ttl <= 0;
+		if (!ttl_trigger && slice->stmt_stat.deletes > 0) {
+			double file_age = 0;
+			if (vy_slice_file_age_seconds(slice, &file_age)) {
+				double ttl = vy_fade_level_ttl(
+					opts->tombstone_compaction_ttl,
+					opts->run_size_ratio, levels[idx],
+					level_count);
+				ttl_trigger = file_age >= ttl;
+			}
 		}
+		if (!ratio_trigger || !ttl_trigger)
+			continue;
+		trigger = slice;
+		trigger_ratio = ratio;
+		trigger_idx = idx;
+		trigger_by_ttl = true;
+		break;
 	}
 	if (trigger == NULL) {
+		free(levels);
 		return;
 	}
 	assert(trigger_idx >= 0);
 
-	uint32_t *levels = xmalloc(range->slice_count * sizeof(uint32_t));
-	vy_range_shape_level_pass(range, opts, levels);
 	uint32_t trigger_level = levels[trigger_idx];
 	uint32_t next_level = trigger_level + 1;
 	for (int i = trigger_idx + 1; i < range->slice_count; i++) {
@@ -1181,10 +1227,11 @@ vy_compaction_plan_check_tombstone(struct vy_range *range,
 		return;
 	}
 	say_verbose("compaction plan for range %s: tombstone compaction "
-			"scheduled (trigger slice %" PRId64 " level %u "
+			"scheduled (trigger slice %" PRId64 " level %u by %s, "
 			"ratio %.4f threshold %.4f, %d slices)",
 			vy_range_str(range), trigger->id,
-			trigger_level, trigger_ratio,
+			trigger_level, trigger_by_ttl ? "ttl" : "ratio",
+			trigger_ratio,
 			opts->tombstone_threshold, plan->count);
 }
 

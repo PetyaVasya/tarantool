@@ -252,6 +252,16 @@ index_opts_decode(struct index_opts *opts, const char *map,
 			 "stmt_delete_histogram_max_bins must be <= 1000000");
 		return -1;
 	}
+	if (opts->tombstone_compaction_ttl < 0) {
+		diag_set(ClientError, ER_WRONG_INDEX_OPTIONS,
+			 "tombstone_compaction_ttl must be >= 0");
+		return -1;
+	}
+	if (opts->compaction_priority_refresh_interval < 0) {
+		diag_set(ClientError, ER_WRONG_INDEX_OPTIONS,
+			 "compaction_priority_refresh_interval must be >= 0");
+		return -1;
+	}
 	if (opts->compression_level < -7 || opts->compression_level > 22) {
 		diag_set(ClientError, ER_WRONG_INDEX_OPTIONS,
 			 "compression_level must within range [-7..22]");

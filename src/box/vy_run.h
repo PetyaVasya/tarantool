@@ -102,6 +102,8 @@ struct vy_run_info {
 	struct tuple_bloom *bloom;
 	/** Statement statistics. */
 	struct vy_stmt_stat stmt_stat;
+	/** Run creation timestamp in wall-clock seconds since epoch. */
+	double creation_time;
 };
 
 /**

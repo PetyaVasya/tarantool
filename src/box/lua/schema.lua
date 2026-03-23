@@ -1397,6 +1397,8 @@ local index_options = {
     bloom_fpr = 'number',
     tombstone_threshold = 'number',
     stmt_delete_histogram_max_bins = 'number',
+    tombstone_compaction_ttl = 'number',
+    compaction_priority_refresh_interval = 'number',
     compression_level = 'number',
     func = 'number, string',
     hint = 'boolean',
@@ -1496,6 +1498,8 @@ box.schema.index.create = function(space_id, name, options)
             bloom_fpr = box.cfg.vinyl_bloom_fpr,
             tombstone_threshold = 1.0,
             stmt_delete_histogram_max_bins = 0,
+            tombstone_compaction_ttl = 0,
+            compaction_priority_refresh_interval = 0,
             compression_level = box.cfg.vinyl_compression_level,
         }
     else
@@ -1546,6 +1550,9 @@ box.schema.index.create = function(space_id, name, options)
             tombstone_threshold = options.tombstone_threshold,
             stmt_delete_histogram_max_bins =
                 options.stmt_delete_histogram_max_bins,
+            tombstone_compaction_ttl = options.tombstone_compaction_ttl,
+            compaction_priority_refresh_interval =
+                options.compaction_priority_refresh_interval,
             compression_level = options.compression_level,
             func = options.func,
             hint = options.hint,
