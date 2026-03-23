@@ -369,6 +369,11 @@ create_unit_test(PREFIX histogram
                  LIBRARIES stat unit
 )
 
+create_unit_test(PREFIX vy_stream_histogram
+                 SOURCES vy_stream_histogram.c core_test_utils.c
+                 LIBRARIES stat unit
+)
+
 create_unit_test(PREFIX ratelimit
                  SOURCES ratelimit.c
                  LIBRARIES unit

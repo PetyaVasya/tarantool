@@ -164,7 +164,7 @@ if(NOT TARGET_OS_OPENBSD)
     endif()
 endif()
 
-add_library(stat STATIC rmean.c latency.c histogram.c)
+add_library(stat STATIC rmean.c latency.c histogram.c vy_stream_histogram.c)
 target_link_libraries(stat core)
 
 add_library(cpu_feature STATIC cpu_feature.c)
