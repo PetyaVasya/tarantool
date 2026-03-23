@@ -212,6 +212,11 @@ struct vy_compaction_plan {
 	 * data is rewritten to a tightly-scoped run.
 	 */
 	bool is_bloat;
+	/**
+	 * True if compaction was scheduled by the tombstone_ratio
+	 * vs tombstone_threshold policy.
+	 */
+	bool is_tombstone;
 };
 
 /**

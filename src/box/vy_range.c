@@ -188,6 +188,7 @@ vy_compaction_plan_reset(struct vy_compaction_plan *plan, int slice_count)
 	plan->priority = 0;
 	plan->is_last_level = false;
 	plan->is_bloat = false;
+	plan->is_tombstone = false;
 	plan->split_key = NULL;
 	if (plan->slices == NULL || slice_count > plan->capacity) {
 		plan->slices = xrealloc(plan->slices, (slice_count + 1) *
@@ -281,6 +282,7 @@ vy_compaction_plan_move(struct vy_compaction_plan *dst,
 	src->priority = 0;
 	src->is_last_level = false;
 	src->is_bloat = false;
+	src->is_tombstone = false;
 	src->split_key = NULL;
 }
 
@@ -461,6 +463,15 @@ vy_range_init_slice(struct vy_range *range, struct vy_slice *slice)
 					  slice_pages, run_pages);
 	slice->count.bytes_compressed = DIV_ROUND_UP(
 		run->count.bytes_compressed * slice_pages, run_pages);
+	struct vy_stmt_stat *st = &run->info.stmt_stat;
+	slice->stmt_stat.inserts = DIV_ROUND_UP(
+		(uint64_t)st->inserts * slice_pages, run_pages);
+	slice->stmt_stat.replaces = DIV_ROUND_UP(
+		(uint64_t)st->replaces * slice_pages, run_pages);
+	slice->stmt_stat.deletes = DIV_ROUND_UP(
+		(uint64_t)st->deletes * slice_pages, run_pages);
+	slice->stmt_stat.upserts = DIV_ROUND_UP(
+		(uint64_t)st->upserts * slice_pages, run_pages);
 	run->referenced_pages += slice->count.pages;
 }
 
@@ -1038,6 +1049,85 @@ vy_compaction_plan_check_bloat(struct vy_range *range)
 }
 
 /**
+ * Tombstone-ratio driven compaction (lowest priority).
+ *
+ * Walk slices from oldest to newest.  The first slice whose
+ * estimated delete share (stmt_stat.deletes / count.rows) exceeds
+ * @a opts->tombstone_threshold triggers a plan: all slices from
+ * the newest down to and including the trigger, plus one older
+ * slice if it exists (so adjacent LSM levels merge).
+ */
+static void
+vy_compaction_plan_check_tombstone(struct vy_range *range,
+				   const struct index_opts *opts)
+{
+	struct vy_compaction_plan *plan = &range->compaction_plan;
+
+	if (range->slice_count < 2)
+		return;
+	if (opts->tombstone_threshold >= 1.)
+		return;
+
+	struct vy_slice *trigger = NULL;
+	double trigger_ratio = 0.;
+	struct vy_slice *slice;
+
+	rlist_foreach_entry_reverse(slice, &range->slices, in_range) {
+		if (slice->count.rows <= 0)
+			continue;
+		double ratio = (double)slice->stmt_stat.deletes /
+			       (double)slice->count.rows;
+		if (ratio > opts->tombstone_threshold) {
+			trigger = slice;
+			trigger_ratio = ratio;
+			break;
+		}
+	}
+	if (trigger == NULL)
+		return;
+
+	rlist_foreach_entry(slice, &range->slices, in_range) {
+		vy_compaction_plan_add(plan, slice);
+		if (slice == trigger)
+			break;
+	}
+	/*
+	 * Slices are ordered newest (head) -> oldest (tail).  One step
+	 * toward the tail follows in_range.next; at the tail, next is
+	 * the list head and there is no older slice.
+	 */
+	struct rlist *next_r = rlist_next(&trigger->in_range);
+	struct vy_slice *older = (next_r == &range->slices) ? NULL :
+		rlist_entry(next_r, struct vy_slice, in_range);
+	bool added_older = false;
+	if (older != NULL) {
+		vy_compaction_plan_add(plan, older);
+		added_older = true;
+	}
+
+	struct vy_slice *range_tail = rlist_last_entry(
+		&range->slices, struct vy_slice, in_range);
+	plan->is_last_level =
+		(plan->slices[plan->count - 1] == range_tail);
+	plan->is_tombstone = true;
+
+	vy_compaction_plan_trim(range, opts);
+
+	if (plan->count == 0) {
+		plan->is_tombstone = false;
+		plan->is_last_level = false;
+		return;
+	}
+
+	say_verbose("compaction plan for range %s: tombstone compaction "
+		    "scheduled (trigger slice %" PRId64 " ratio %.4f "
+		    "threshold %.4f, %d slices%s)",
+		    vy_range_str(range), trigger->id, trigger_ratio,
+		    opts->tombstone_threshold, plan->count,
+		    added_older ? ", +1 older level" : "");
+}
+
+/**
  * Check whether the plan covers a key range disjoint from all
  * older slices in the range.  If so, there are no older versions
  * of any key in the plan below it, and we can set is_last_level
@@ -1133,18 +1223,20 @@ vy_range_update_compaction_priority(struct vy_range *range,
 			vy_compaction_plan_check_shape(range, opts);
 		}
 		/*
-		 * Priority order: shape > read-amp > bloat.
+		 * Priority order: shape > read-amp > bloat > tombstone.
 		 * Shape-based compaction reduces run count (read
 		 * amplification from the LSM structure).  Read-amp
 		 * compaction removes tombstones and shadowed versions
 		 * detected by actual reads.  Bloat compaction reclaims
-		 * space from oversized shared run files -- lowest
-		 * priority since it only saves disk space.
+		 * space from oversized shared run files.  Tombstone-ratio
+		 * compaction rewrites runs with a high delete share.
 		 */
 		if (vy_compaction_plan_is_empty(&range->compaction_plan))
 			vy_compaction_plan_check_read_amp(range, opts);
 		if (vy_compaction_plan_is_empty(&range->compaction_plan))
 			vy_compaction_plan_check_bloat(range);
+		if (vy_compaction_plan_is_empty(&range->compaction_plan))
+			vy_compaction_plan_check_tombstone(range, opts);
 		if (range->compaction_plan.count > 0 &&
 		    !range->compaction_plan.is_last_level)
 			vy_compaction_plan_check_last_level(range);

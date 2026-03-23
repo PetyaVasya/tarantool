@@ -244,6 +244,11 @@ struct vy_slice {
 	uint32_t last_page_no;
 	/** An estimate of the number of statements in this slice. */
 	struct vy_disk_stmt_counter count;
+	/**
+	 * Statement-type counts for this slice, scaled from run->info.stmt_stat
+	 * by page share (same as @a count).
+	 */
+	struct vy_stmt_stat stmt_stat;
 };
 
 /** Position of a particular stmt in vy_run. */
